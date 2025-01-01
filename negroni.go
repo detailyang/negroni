@@ -11,6 +11,10 @@ const (
 	DefaultAddress = ":8080"
 )
 
+func init() {
+	initFeaturePicker()
+}
+
 // Handler handler is an interface that objects can implement to be registered to serve as middleware
 // in the Negroni middleware stack.
 // ServeHTTP should yield to the next middleware in the chain by invoking the next http.HandlerFunc
@@ -31,7 +35,6 @@ func (h HandlerFunc) ServeHTTP(rw http.ResponseWriter, r *http.Request, next htt
 
 type middleware struct {
 	handler Handler
-	next    *middleware
 
 	// nextfn stores the next.ServeHTTP to reduce memory allocate
 	nextfn func(rw http.ResponseWriter, r *http.Request)
@@ -40,7 +43,6 @@ type middleware struct {
 func newMiddleware(handler Handler, next *middleware) middleware {
 	return middleware{
 		handler: handler,
-		next:    next,
 		nextfn:  next.ServeHTTP,
 	}
 }

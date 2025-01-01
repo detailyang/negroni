@@ -160,14 +160,16 @@ func (rec *Recovery) ServeHTTP(rw http.ResponseWriter, r *http.Request, next htt
 		if err := recover(); err != nil {
 			rw.WriteHeader(http.StatusInternalServerError)
 
-			stack := make([]byte, rec.StackSize)
-			stack = stack[:runtime.Stack(stack, rec.StackAll)]
-			infos := &PanicInformation{RecoveredPanic: err, Request: r}
+			infos := &PanicInformation{
+				RecoveredPanic: err,
+				Request:        r,
+				Stack:          make([]byte, rec.StackSize),
+			}
+			infos.Stack = infos.Stack[:runtime.Stack(infos.Stack, rec.StackAll)]
 
 			// PrintStack will write stack trace info to the ResponseWriter if set to true!
 			// If set to false it will respond with the standard response documented here https://httpstat.us/500
-			if rec.PrintStack {
-				infos.Stack = stack
+			if rec.PrintStack && rec.Formatter != nil {
 				rec.Formatter.FormatPanicError(rw, r, infos)
 			} else {
 				if rw.Header().Get("Content-Type") == "" {
@@ -177,7 +179,7 @@ func (rec *Recovery) ServeHTTP(rw http.ResponseWriter, r *http.Request, next htt
 			}
 
 			if rec.LogStack {
-				rec.Logger.Printf(panicText, err, stack)
+				rec.Logger.Printf(panicText, err, infos.Stack)
 			}
 
 			if rec.ErrorHandlerFunc != nil {

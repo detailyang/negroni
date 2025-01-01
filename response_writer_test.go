@@ -2,6 +2,7 @@ package negroni
 
 import (
 	"bufio"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -68,6 +69,34 @@ func TestResponseWriterBeforeFuncHasAccessToStatus(t *testing.T) {
 	expect(t, status, http.StatusCreated)
 }
 
+func TestResponseWriterBeforeFuncCanChangeStatus(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := NewResponseWriter(rec)
+
+	// Always respond with 200.
+	rw.Before(func(w ResponseWriter) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	rw.WriteHeader(http.StatusBadRequest)
+	expect(t, rec.Code, http.StatusOK)
+}
+
+func TestResponseWriterBeforeFuncChangesStatusMultipleTimes(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := NewResponseWriter(rec)
+
+	rw.Before(func(w ResponseWriter) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	rw.Before(func(w ResponseWriter) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	rw.WriteHeader(http.StatusOK)
+	expect(t, rec.Code, http.StatusNotFound)
+}
+
 func TestResponseWriterWritingString(t *testing.T) {
 	rec := httptest.NewRecorder()
 	rw := NewResponseWriter(rec)
@@ -79,6 +108,29 @@ func TestResponseWriterWritingString(t *testing.T) {
 	expect(t, rw.Status(), http.StatusOK)
 	expect(t, rw.Size(), 11)
 	expect(t, rw.Written(), true)
+}
+
+func TestResponseWriterWrittenStatusCode(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := NewResponseWriter(rec)
+
+	expect(t, rw.Written(), false)
+	for status := http.StatusContinue; status <= http.StatusEarlyHints; status++ {
+		if status == http.StatusSwitchingProtocols {
+			continue
+		}
+		rw.WriteHeader(status)
+		expected := false
+		expect(t, rw.Written(), expected)
+	}
+	rw.WriteHeader(http.StatusCreated)
+	expect(t, rw.Written(), true)
+
+	rw2 := NewResponseWriter(rec)
+	expect(t, rw2.Written(), false)
+	rw2.WriteHeader(http.StatusSwitchingProtocols)
+	expect(t, rw2.Written(), true)
+
 }
 
 func TestResponseWriterWritingStrings(t *testing.T) {
@@ -99,6 +151,19 @@ func TestResponseWriterWritingHeader(t *testing.T) {
 	rw := NewResponseWriter(rec)
 
 	rw.WriteHeader(http.StatusNotFound)
+
+	expect(t, rec.Code, rw.Status())
+	expect(t, rec.Body.String(), "")
+	expect(t, rw.Status(), http.StatusNotFound)
+	expect(t, rw.Size(), 0)
+}
+
+func TestResponseWriterWritingHeaderTwice(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := NewResponseWriter(rec)
+
+	rw.WriteHeader(http.StatusNotFound)
+	rw.WriteHeader(http.StatusInternalServerError)
 
 	expect(t, rec.Code, rw.Status())
 	expect(t, rec.Body.String(), "")
@@ -127,6 +192,17 @@ func TestResponseWriterBefore(t *testing.T) {
 	expect(t, result, "barfoo")
 }
 
+func TestResponseWriterUnwrap(t *testing.T) {
+	rec := httptest.NewRecorder()
+	rw := NewResponseWriter(rec)
+	switch v := rw.(type) {
+	case interface{ Unwrap() http.ResponseWriter }:
+		expect(t, v.Unwrap(), rec)
+	default:
+		t.Error("Does not implement Unwrap()")
+	}
+}
+
 func TestResponseWriterHijack(t *testing.T) {
 	hijackable := newHijackableResponse()
 	rw := NewResponseWriter(hijackable)
@@ -142,11 +218,8 @@ func TestResponseWriterHijack(t *testing.T) {
 func TestResponseWriteHijackNotOK(t *testing.T) {
 	hijackable := new(http.ResponseWriter)
 	rw := NewResponseWriter(*hijackable)
-	hijacker, ok := rw.(http.Hijacker)
-	expect(t, ok, true)
-	_, _, err := hijacker.Hijack()
-
-	refute(t, err, nil)
+	_, ok := rw.(http.Hijacker)
+	expect(t, ok, false)
 }
 
 func TestResponseWriterCloseNotify(t *testing.T) {
@@ -181,7 +254,66 @@ func TestResponseWriter_Flush_marksWritten(t *testing.T) {
 	rec := httptest.NewRecorder()
 	rw := NewResponseWriter(rec)
 
-	rw.Flush()
+	rw.(http.Flusher).Flush()
 	expect(t, rw.Status(), http.StatusOK)
 	expect(t, rw.Written(), true)
+}
+
+// mockReader only implements io.Reader without other methods like WriterTo
+type mockReader struct {
+	readStr string
+	eof     bool
+}
+
+func (r *mockReader) Read(p []byte) (n int, err error) {
+	if r.eof {
+		return 0, io.EOF
+	}
+	copy(p, []byte(r.readStr))
+	r.eof = true
+	return len(r.readStr), nil
+}
+
+func TestResponseWriterWithoutReadFrom(t *testing.T) {
+	writeString := "Hello world"
+
+	rec := httptest.NewRecorder()
+	rw := NewResponseWriter(rec)
+
+	n, err := io.Copy(rw, &mockReader{readStr: writeString})
+	expect(t, err, nil)
+	expect(t, rw.Status(), http.StatusOK)
+	expect(t, rw.Written(), true)
+	expect(t, rw.Size(), len(writeString))
+	expect(t, int(n), len(writeString))
+	expect(t, rec.Body.String(), writeString)
+}
+
+type mockResponseWriterWithReadFrom struct {
+	*httptest.ResponseRecorder
+	writtenStr string
+}
+
+func (rw *mockResponseWriterWithReadFrom) ReadFrom(r io.Reader) (n int64, err error) {
+	bytes, err := io.ReadAll(r)
+	if err != nil {
+		return 0, err
+	}
+	rw.writtenStr = string(bytes)
+	rw.ResponseRecorder.Write(bytes)
+	return int64(len(bytes)), nil
+}
+
+func TestResponseWriterWithReadFrom(t *testing.T) {
+	writeString := "Hello world"
+	mrw := &mockResponseWriterWithReadFrom{ResponseRecorder: httptest.NewRecorder()}
+	rw := NewResponseWriter(mrw)
+	n, err := io.Copy(rw, &mockReader{readStr: writeString})
+	expect(t, err, nil)
+	expect(t, rw.Status(), http.StatusOK)
+	expect(t, rw.Written(), true)
+	expect(t, rw.Size(), len(writeString))
+	expect(t, int(n), len(writeString))
+	expect(t, mrw.Body.String(), writeString)
+	expect(t, mrw.writtenStr, writeString)
 }
